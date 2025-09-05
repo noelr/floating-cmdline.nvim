@@ -66,9 +66,6 @@ local function create_buffer()
   -- Set up custom command completion
   vim.api.nvim_buf_set_option(state.buf, 'completefunc', 'v:lua.floating_cmdline_complete')
   
-  -- Disable Copilot for this buffer
-  vim.api.nvim_buf_set_var(state.buf, 'copilot_enabled', false)
-  
   vim.api.nvim_buf_set_name(state.buf, '[Floating Command Line]')
 end
 
