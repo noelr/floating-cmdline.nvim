@@ -7,8 +7,8 @@ endif
 let g:loaded_floating_cmdline = 1
 
 " Commands
-command! FloatingCmdline lua require('floating-cmdline').toggle()
-command! FloatingCmdlineToggle lua require('floating-cmdline').toggle()
+command! FloatingCmdline lua require('floating-cmdline').open()
+command! FloatingCmdlineToggle lua require('floating-cmdline').open()
 command! FloatingCmdlineOpen lua require('floating-cmdline').open()
 command! FloatingCmdlineClose lua require('floating-cmdline').close()
 
