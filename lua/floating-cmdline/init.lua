@@ -314,21 +314,10 @@ local function command_complete(findstart, base)
 end
 
 
-
--- Execute current line as command (terminal-style)
-local function execute_current_line()
-  -- Get cursor position and current line
-  local cursor = vim.api.nvim_win_get_cursor(state.win)
-  local line_num = cursor[1]
-  local current_line = vim.api.nvim_buf_get_lines(state.buf, line_num - 1, line_num, false)[1]
-  
-  -- Trim whitespace to get command
-  local cmd = current_line:gsub('^%s*(.-)%s*$', '%1')
-  if cmd == '' then
-    return  -- Empty line, nothing to execute
-  end
-  
+-- Shared function to execute a command and handle output
+local function execute_command(cmd, line_num)
   -- Replace the current line with the trimmed command (remove leading whitespace)
+  local current_line = vim.api.nvim_buf_get_lines(state.buf, line_num - 1, line_num, false)[1]
   if current_line ~= cmd then
     vim.api.nvim_buf_set_lines(state.buf, line_num - 1, line_num, false, {cmd})
   end
@@ -340,6 +329,13 @@ local function execute_current_line()
   
   -- Add to Vim's native command history
   vim.fn.histadd('cmd', cmd)
+  
+  -- Get existing ID to reuse (if any)
+  local existing_id = nil
+  local stored_cmd, stored_id, metadata_line = get_output_metadata(line_num)
+  if stored_id then
+    existing_id = stored_id
+  end
   
   -- First, delete any existing output for this command
   local start_line, end_line = get_command_output_range(line_num)
@@ -362,7 +358,7 @@ local function execute_current_line()
     state.buf = nil
     state.win = nil
     state.is_open = false
-    return
+    return nil
   end
   
   -- Switch back to our window
@@ -371,7 +367,18 @@ local function execute_current_line()
   -- Process output and prepare lines to insert
   local output_lines = {}
   if not ok then
-    table.insert(output_lines, '  Error: ' .. result)  -- Error with indent
+    -- Split error message by newlines to avoid newline issues in nvim_buf_set_lines
+    local error_msg = tostring(result)
+    for line in error_msg:gmatch('[^\r\n]+') do
+      local trimmed = line:gsub('^%s*(.-)%s*$', '%1')
+      if trimmed ~= '' then
+        if #output_lines == 0 then
+          table.insert(output_lines, '  Error: ' .. trimmed)  -- Add "Error:" prefix to first line
+        else
+          table.insert(output_lines, '  ' .. trimmed)  -- Indent subsequent lines
+        end
+      end
+    end
   elseif result and result ~= '' then
     for line in result:gmatch('[^\r\n]+') do
       local trimmed = line:gsub('^%s*(.-)%s*$', '%1')
@@ -424,6 +431,28 @@ local function execute_current_line()
     vim.api.nvim_buf_set_lines(state.buf, line_num, line_num, false, final_lines)
   end
   
+  return final_lines
+end
+
+-- Execute current line as command (terminal-style)
+local function execute_current_line()
+  -- Get cursor position and current line
+  local cursor = vim.api.nvim_win_get_cursor(state.win)
+  local line_num = cursor[1]
+  local current_line = vim.api.nvim_buf_get_lines(state.buf, line_num - 1, line_num, false)[1]
+  
+  -- Trim whitespace to get command
+  local cmd = current_line:gsub('^%s*(.-)%s*$', '%1')
+  if cmd == '' then
+    return  -- Empty line, nothing to execute
+  end
+  
+  -- Execute the command using shared function
+  local final_lines = execute_command(cmd, line_num)
+  if not final_lines then
+    return  -- Buffer/window was destroyed
+  end
+  
   -- Move cursor to the line after the output (or stay on command if no output)
   local new_cursor_line = line_num + #final_lines + 1
   local total_lines = vim.api.nvim_buf_line_count(state.buf)
@@ -469,102 +498,10 @@ local function rerun_command_at_cursor()
     return  -- Not on a command line
   end
   
-  -- Get existing ID to reuse (if any)
-  local existing_id = nil
-  local stored_cmd, stored_id, metadata_line = get_output_metadata(cmd_line)
-  if stored_id then
-    existing_id = stored_id
-  end
+  -- Execute the command using shared function
+  execute_command(cmd, cmd_line)
   
-  -- Delete old output (but keep the command line)
-  local start_line, end_line = get_command_output_range(cmd_line)
-  if start_line then
-    vim.api.nvim_buf_set_lines(state.buf, start_line - 1, end_line, false, {})
-  end
-  
-  -- Store original context
-  local target_win = state.original_win
-  if target_win and vim.api.nvim_win_is_valid(target_win) then
-    vim.api.nvim_set_current_win(target_win)
-  end
-  
-  -- Execute command and capture output
-  local ok, result = pcall(vim.fn.execute, cmd)
-  
-  -- Check if our window and buffer are still valid (command might have destroyed them)
-  if not vim.api.nvim_buf_is_valid(state.buf) or not vim.api.nvim_win_is_valid(state.win) then
-    -- Buffer or window was destroyed by the command, bail out
-    state.buf = nil
-    state.win = nil
-    state.is_open = false
-    return
-  end
-  
-  -- Switch back to our window
-  vim.api.nvim_set_current_win(state.win)
-  
-  -- Insert new output after the command line
-  local output_lines = {}
-  local is_error = false
-  if not ok then
-    table.insert(output_lines, '  Error: ' .. result)
-    is_error = true
-  elseif result and result ~= '' then
-    for line in result:gmatch('[^\r\n]+') do
-      local trimmed = line:gsub('^%s*(.-)%s*$', '%1')
-      if trimmed ~= '' then
-        table.insert(output_lines, '  ' .. trimmed)
-      end
-    end
-  end
-  
-  -- Add metadata as first line of output (if there is output)
-  local id = nil
-  if #output_lines > 0 then
-    -- Reuse existing ID if available, otherwise generate new one
-    if existing_id then
-      id = existing_id
-    else
-      state.next_id = state.next_id + 1
-      id = tostring(state.next_id)
-    end
-    table.insert(output_lines, 1, '  --CMD:' .. cmd .. '|ID:' .. id)
-  end
-  
-  -- Truncate long output (threshold: 9 lines including metadata)
-  local final_lines = {}
-  if #output_lines > 9 then
-    -- Show metadata + first 8 content lines
-    for i = 1, 9 do
-      table.insert(final_lines, output_lines[i])
-    end
-    -- Add summary line and store hidden content in buffer variable
-    local hidden_count = #output_lines - 9
-    local summary_line = '  ... ' .. hidden_count .. ' more lines'
-    table.insert(final_lines, summary_line)
-    
-    -- Store hidden lines in buffer variable for later expansion
-    local hidden_lines = {}
-    for i = 10, #output_lines do
-      table.insert(hidden_lines, output_lines[i])
-    end
-    -- Store hidden content using the unique ID (overwrites any existing)
-    if id then
-      vim.api.nvim_buf_set_var(state.buf, 'hidden_' .. id, hidden_lines)
-    end
-  else
-    final_lines = output_lines
-  end
-  
-  -- Insert output after the command line
-  if #final_lines > 0 then
-    vim.api.nvim_buf_set_lines(state.buf, cmd_line, cmd_line, false, final_lines)
-    
-    -- With custom syntax, highlighting is handled automatically
-  end
-  
-  -- Position cursor back on the command line
-  vim.api.nvim_win_set_cursor(state.win, {cmd_line, 0})
+  -- No cursor movement needed - stays on the command line automatically
 end
 
 -- Delete command at cursor and its output
