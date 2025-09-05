@@ -15,6 +15,7 @@ The plugin creates a floating window where you can type and execute Vim commands
 ### Inside the Floating Window
 
 - **Enter** - Execute the current line as a command
+- **Ctrl+N** - Trigger command completion (in insert mode)
 - **Ctrl+C** - Close the window
 - **Press Enter on "... N more lines"** - Expand truncated output
 - **Normal Vim editing** - Edit commands, navigate with arrow keys, etc.
