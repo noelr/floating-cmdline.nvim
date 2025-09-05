@@ -17,7 +17,7 @@ A floating command line interface for Neovim that provides an interactive termin
 ### Using [lazy.nvim](https://github.com/folke/lazy.nvim)
 ```lua
 {
-  'yourusername/floating-cmdline.nvim',
+  'noelr/floating-cmdline.nvim',
   config = function()
     require('floating-cmdline').setup()
   end,
@@ -30,7 +30,7 @@ A floating command line interface for Neovim that provides an interactive termin
 ### Using [packer.nvim](https://github.com/wbthomason/packer.nvim)
 ```lua
 use {
-  'yourusername/floating-cmdline.nvim',
+  'noelr/floating-cmdline.nvim',
   config = function()
     require('floating-cmdline').setup()
   end
@@ -39,7 +39,7 @@ use {
 
 ### Using [vim-plug](https://github.com/junegunn/vim-plug)
 ```vim
-Plug 'yourusername/floating-cmdline.nvim'
+Plug 'noelr/floating-cmdline.nvim'
 
 lua << EOF
 require('floating-cmdline').setup()
