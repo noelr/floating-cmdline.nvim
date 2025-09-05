@@ -718,10 +718,6 @@ local function setup_keymaps()
   vim.keymap.set('n', '<C-c>', function()
     M.close()
   end, { buffer = state.buf, silent = true })
-  
-  vim.keymap.set('n', 'q', function()
-    M.close()
-  end, { buffer = state.buf, silent = true })
 end
 
 -- Close floating terminal
