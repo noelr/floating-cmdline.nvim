@@ -7,6 +7,7 @@ local config = {
   border = 'rounded', -- Border style
   output_highlight = 'Comment', -- Highlight group for output lines
   error_highlight = 'ErrorMsg', -- Highlight group for error lines
+  keybind = nil, -- User must provide a keybinding in setup()
 }
 
 -- State
@@ -776,8 +777,10 @@ function M.setup(opts)
     config[k] = v
   end
   
-  -- Set up global keymap
-  vim.keymap.set('n', '|', M.open, { silent = true, desc = 'Open floating command line' })
+  -- Set up global keymap if keybind is provided
+  if config.keybind then
+    vim.keymap.set('n', config.keybind, M.open, { silent = true, desc = 'Open floating command line' })
+  end
 end
 
 return M
