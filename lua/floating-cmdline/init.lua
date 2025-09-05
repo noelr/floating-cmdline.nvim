@@ -7,7 +7,8 @@ local config = {
   border = 'rounded', -- Border style
   output_highlight = 'Comment', -- Highlight group for output lines
   error_highlight = 'ErrorMsg', -- Highlight group for error lines
-  keybind = nil, -- User must provide a keybinding in setup()
+  keybind = nil, -- Keybinding for floating window (optional)
+  edit_keybind = nil, -- Keybinding for edit mode (optional)
 }
 
 -- State
@@ -53,20 +54,59 @@ local function setup_highlights()
   vim.api.nvim_set_hl(0, 'floatingcmdError', { link = config.error_highlight, default = true })
 end
 
--- Create terminal buffer
-local function create_buffer()
-  state.buf = vim.api.nvim_create_buf(false, true)
+-- Forward declaration - will be defined after keymaps
+local setup_keymaps_for_buffer
+
+-- Setup buffer with floating command line functionality
+local function setup_command_buffer(buf, name)
+  -- Generate unique name if not provided
+  if not name then
+    name = '[Floating Command Line ' .. buf .. ']'
+  end
   
-  vim.api.nvim_buf_set_option(state.buf, 'buftype', 'nofile')
-  vim.api.nvim_buf_set_option(state.buf, 'filetype', 'floatingcmd')  -- Custom filetype for controlled highlighting
-  vim.api.nvim_buf_set_option(state.buf, 'bufhidden', 'hide')  -- Keep buffer when window closes
-  vim.api.nvim_buf_set_option(state.buf, 'swapfile', false)
-  vim.api.nvim_buf_set_option(state.buf, 'buflisted', false)
+  vim.api.nvim_buf_set_option(buf, 'buftype', 'nofile')
+  vim.api.nvim_buf_set_option(buf, 'filetype', 'floatingcmd')  -- Custom filetype for controlled highlighting
+  vim.api.nvim_buf_set_option(buf, 'bufhidden', 'hide')  -- Keep buffer when window closes
+  vim.api.nvim_buf_set_option(buf, 'swapfile', false)
+  vim.api.nvim_buf_set_option(buf, 'buflisted', false)
+  vim.api.nvim_buf_set_option(buf, 'modified', false)  -- Mark as unmodified to avoid swap issues
   
   -- Set up custom command completion
-  vim.api.nvim_buf_set_option(state.buf, 'completefunc', 'v:lua.floating_cmdline_complete')
+  vim.api.nvim_buf_set_option(buf, 'completefunc', 'v:lua.floating_cmdline_complete')
   
-  vim.api.nvim_buf_set_name(state.buf, '[Floating Command Line]')
+  -- Set name with error handling for duplicates  
+  -- Use pcall to avoid naming conflicts and ensure swapfile is disabled first
+  local success = pcall(vim.api.nvim_buf_set_name, buf, name)
+  if not success then
+    -- If naming failed, try a unique name
+    pcall(vim.api.nvim_buf_set_name, buf, name .. ' (' .. buf .. ')')
+  end
+  
+  -- Setup highlights (needed for each buffer)
+  setup_highlights()
+  
+  -- Setup keymaps for this buffer
+  setup_keymaps_for_buffer(buf)
+end
+
+
+-- Get or create the shared command buffer
+local function get_or_create_shared_buffer()
+  -- Create buffer if it doesn't exist, is invalid, or doesn't have our setup
+  local needs_setup = not state.buf 
+    or not vim.api.nvim_buf_is_valid(state.buf)
+    or vim.api.nvim_buf_get_option(state.buf, 'filetype') ~= 'floatingcmd'
+    
+  if needs_setup then
+    state.buf = vim.api.nvim_create_buf(false, true)
+    setup_command_buffer(state.buf, '[Floating Command Line]')
+  end
+  return state.buf
+end
+
+-- Create terminal buffer for floating window (now uses shared buffer)
+local function create_buffer()
+  state.buf = get_or_create_shared_buffer()
 end
 
 -- Create floating window
@@ -93,12 +133,13 @@ end
 
 
 -- Find the output range for a command at given line
-local function get_command_output_range(cmd_line)
-  if not state.buf or not vim.api.nvim_buf_is_valid(state.buf) then
+local function get_command_output_range(cmd_line, buf)
+  buf = buf or vim.api.nvim_get_current_buf()
+  if not vim.api.nvim_buf_is_valid(buf) then
     return nil, nil
   end
   
-  local lines = vim.api.nvim_buf_get_lines(state.buf, 0, -1, false)
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   local total_lines = #lines
   
   -- Output starts right after the command line
@@ -126,12 +167,13 @@ local function get_command_output_range(cmd_line)
 end
 
 -- Get metadata from output (if it exists)
-local function get_output_metadata(line_num)
-  if not state.buf or not vim.api.nvim_buf_is_valid(state.buf) then
+local function get_output_metadata(line_num, buf)
+  buf = buf or vim.api.nvim_get_current_buf()
+  if not vim.api.nvim_buf_is_valid(buf) then
     return nil, nil, nil
   end
   
-  local lines = vim.api.nvim_buf_get_lines(state.buf, 0, -1, false)
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   
   -- Check if the next line after the command is metadata
   if line_num < #lines then
@@ -316,10 +358,13 @@ end
 
 -- Shared function to execute a command and handle output
 local function execute_command(cmd, line_num)
+  local buf = vim.api.nvim_get_current_buf()
+  local win = vim.api.nvim_get_current_win()
+  
   -- Replace the current line with the trimmed command (remove leading whitespace)
-  local current_line = vim.api.nvim_buf_get_lines(state.buf, line_num - 1, line_num, false)[1]
+  local current_line = vim.api.nvim_buf_get_lines(buf, line_num - 1, line_num, false)[1]
   if current_line ~= cmd then
-    vim.api.nvim_buf_set_lines(state.buf, line_num - 1, line_num, false, {cmd})
+    vim.api.nvim_buf_set_lines(buf, line_num - 1, line_num, false, {cmd})
   end
   
   -- Close any open completion popup
@@ -332,37 +377,43 @@ local function execute_command(cmd, line_num)
   
   -- Get existing ID to reuse (if any)
   local existing_id = nil
-  local stored_cmd, stored_id, metadata_line = get_output_metadata(line_num)
+  local stored_cmd, stored_id, metadata_line = get_output_metadata(line_num, buf)
   if stored_id then
     existing_id = stored_id
   end
   
   -- First, delete any existing output for this command
-  local start_line, end_line = get_command_output_range(line_num)
+  local start_line, end_line = get_command_output_range(line_num, buf)
   if start_line then
-    vim.api.nvim_buf_set_lines(state.buf, start_line - 1, end_line, false, {})
+    vim.api.nvim_buf_set_lines(buf, start_line - 1, end_line, false, {})
   end
   
-  -- Store original context
-  local target_win = state.original_win
-  if target_win and vim.api.nvim_win_is_valid(target_win) then
+  -- Store original context (try to use the target window if this is the floating window)
+  local target_win = nil
+  if buf == state.buf and state.original_win and vim.api.nvim_win_is_valid(state.original_win) then
+    target_win = state.original_win
+  end
+  
+  if target_win then
     vim.api.nvim_set_current_win(target_win)
   end
   
   -- Execute command and capture output
   local ok, result = pcall(vim.fn.execute, cmd)
   
-  -- Check if our window and buffer are still valid (command might have destroyed them)
-  if not vim.api.nvim_buf_is_valid(state.buf) or not vim.api.nvim_win_is_valid(state.win) then
+  -- Check if our buffer and window are still valid (command might have destroyed them)
+  if not vim.api.nvim_buf_is_valid(buf) or not vim.api.nvim_win_is_valid(win) then
     -- Buffer or window was destroyed by the command, bail out
-    state.buf = nil
-    state.win = nil
-    state.is_open = false
+    if buf == state.buf then
+      state.buf = nil
+      state.win = nil
+      state.is_open = false
+    end
     return nil
   end
   
-  -- Switch back to our window
-  vim.api.nvim_set_current_win(state.win)
+  -- Switch back to our command window
+  vim.api.nvim_set_current_win(win)
   
   -- Process output and prepare lines to insert
   local output_lines = {}
@@ -420,7 +471,7 @@ local function execute_command(cmd, line_num)
     end
     -- Store hidden content using the unique ID
     if id then
-      vim.api.nvim_buf_set_var(state.buf, 'hidden_' .. id, hidden_lines)
+      vim.api.nvim_buf_set_var(buf, 'hidden_' .. id, hidden_lines)
     end
   else
     final_lines = output_lines
@@ -428,7 +479,7 @@ local function execute_command(cmd, line_num)
   
   -- Insert output directly after the command line
   if #final_lines > 0 then
-    vim.api.nvim_buf_set_lines(state.buf, line_num, line_num, false, final_lines)
+    vim.api.nvim_buf_set_lines(buf, line_num, line_num, false, final_lines)
   end
   
   return final_lines
@@ -436,10 +487,14 @@ end
 
 -- Execute current line as command (terminal-style)
 local function execute_current_line()
+  -- Get current window and buffer
+  local win = vim.api.nvim_get_current_win()
+  local buf = vim.api.nvim_get_current_buf()
+  
   -- Get cursor position and current line
-  local cursor = vim.api.nvim_win_get_cursor(state.win)
+  local cursor = vim.api.nvim_win_get_cursor(win)
   local line_num = cursor[1]
-  local current_line = vim.api.nvim_buf_get_lines(state.buf, line_num - 1, line_num, false)[1]
+  local current_line = vim.api.nvim_buf_get_lines(buf, line_num - 1, line_num, false)[1]
   
   -- Trim whitespace to get command
   local cmd = current_line:gsub('^%s*(.-)%s*$', '%1')
@@ -455,14 +510,32 @@ local function execute_current_line()
   
   -- Move cursor to the line after the output (or stay on command if no output)
   local new_cursor_line = line_num + #final_lines + 1
-  local total_lines = vim.api.nvim_buf_line_count(state.buf)
+  local total_lines = vim.api.nvim_buf_line_count(buf)
+  
+  -- Validate that window and buffer are still valid and that window shows the same buffer
+  if not vim.api.nvim_win_is_valid(win) or not vim.api.nvim_buf_is_valid(buf) then
+    return
+  end
+  
+  -- Check if the window is still showing our buffer (commands like 'db' or 'Explore' change this)
+  if vim.api.nvim_win_get_buf(win) ~= buf then
+    return  -- Window is now showing a different buffer, don't try to set cursor
+  end
   
   -- If we're at the end of the buffer, add an empty line for the next command
   if new_cursor_line > total_lines then
-    vim.api.nvim_buf_set_lines(state.buf, total_lines, total_lines, false, {''})
-    vim.api.nvim_win_set_cursor(state.win, {total_lines + 1, 0})
+    vim.api.nvim_buf_set_lines(buf, total_lines, total_lines, false, {''})
+    -- Refresh line count after adding the line and set cursor to last line
+    total_lines = vim.api.nvim_buf_line_count(buf)
+    if total_lines > 0 then
+      vim.api.nvim_win_set_cursor(win, {total_lines, 0})
+    end
   else
-    vim.api.nvim_win_set_cursor(state.win, {new_cursor_line, 0})
+    -- Ensure new_cursor_line is within bounds
+    local cursor_line = math.min(total_lines, math.max(1, new_cursor_line))
+    if cursor_line > 0 and cursor_line <= total_lines then
+      vim.api.nvim_win_set_cursor(win, {cursor_line, 0})
+    end
   end
   
   -- Cancel any active completion before starting new line
@@ -474,13 +547,16 @@ end
 
 -- Get command at cursor line (for rerun functionality)
 local function get_command_at_cursor()
-  if not state.buf or not vim.api.nvim_buf_is_valid(state.buf) then
+  local buf = vim.api.nvim_get_current_buf()
+  local win = vim.api.nvim_get_current_win()
+  
+  if not vim.api.nvim_buf_is_valid(buf) then
     return nil
   end
   
-  local cursor = vim.api.nvim_win_get_cursor(state.win)
+  local cursor = vim.api.nvim_win_get_cursor(win)
   local line_num = cursor[1]
-  local current_line = vim.api.nvim_buf_get_lines(state.buf, line_num - 1, line_num, false)[1]
+  local current_line = vim.api.nvim_buf_get_lines(buf, line_num - 1, line_num, false)[1]
   
   -- Check if this line looks like a command (not indented output)
   if current_line and not current_line:match('^%s%s') and current_line:match('%S') then
@@ -573,13 +649,14 @@ local function jump_to_previous_command()
 end
 
 -- Setup keymaps for terminal-style buffer
-local function setup_keymaps()
+-- Setup keymaps for a specific buffer (works for any buffer, not just floating)
+setup_keymaps_for_buffer = function(buf)
   -- Set up autocmds
-  local augroup = vim.api.nvim_create_augroup('FloatingCommandLine', { clear = true })
+  local augroup = vim.api.nvim_create_augroup('FloatingCommandLine_' .. buf, { clear = true })
   
   -- Detect command changes and clear outdated output
   vim.api.nvim_create_autocmd({'TextChanged', 'TextChangedI'}, {
-    buffer = state.buf,
+    buffer = buf,
     group = augroup,
     callback = function()
       -- Use vim.schedule to avoid conflicts during editing
@@ -601,7 +678,7 @@ local function setup_keymaps()
       -- No popup, execute immediately
       execute_current_line()
     end
-  end, { buffer = state.buf, silent = true })
+  end, { buffer = buf, silent = true })
   
   -- Insert mode: Ctrl-N for context-aware completion
   vim.keymap.set('i', '<C-n>', function()
@@ -612,14 +689,14 @@ local function setup_keymaps()
       -- No popup, trigger user completion
       return '<C-x><C-u>'
     end
-  end, { buffer = state.buf, silent = true, expr = true })
+  end, { buffer = buf, silent = true, expr = true })
   
   -- Normal mode: Enter to rerun command at cursor or expand truncated output
   vim.keymap.set('n', '<CR>', function()
     -- Check if we're on a truncation summary line
-    local cursor = vim.api.nvim_win_get_cursor(state.win)
+    local cursor = vim.api.nvim_win_get_cursor(0)  -- Use current window instead of state.win
     local line_num = cursor[1]
-    local current_line = vim.api.nvim_buf_get_lines(state.buf, line_num - 1, line_num, false)[1]
+    local current_line = vim.api.nvim_buf_get_lines(buf, line_num - 1, line_num, false)[1]
     
     if current_line and current_line:match('^  %.%.%. .* more lines$') then
       -- We're on a truncation summary line, expand it
@@ -628,7 +705,7 @@ local function setup_keymaps()
       -- Normal behavior: rerun command
       rerun_command_at_cursor()
     end
-  end, { buffer = state.buf, silent = true, desc = 'Rerun command or expand output' })
+  end, { buffer = buf, silent = true, desc = 'Rerun command or expand output' })
   
   -- Normal mode: dd to delete command and its output (or normal delete)
   vim.keymap.set('n', 'dd', function()
@@ -637,22 +714,32 @@ local function setup_keymaps()
       -- Not on a command line, use normal dd behavior
       vim.cmd('normal! dd')
     end
-  end, { buffer = state.buf, silent = true, desc = 'Delete line (or command with output)' })
+  end, { buffer = buf, silent = true, desc = 'Delete line (or command with output)' })
   
   -- Normal mode: Command navigation
   vim.keymap.set('n', ']c', function()
     jump_to_next_command()
-  end, { buffer = state.buf, silent = true, desc = 'Jump to next command' })
+  end, { buffer = buf, silent = true, desc = 'Jump to next command' })
   
   vim.keymap.set('n', '[c', function()
     jump_to_previous_command()
-  end, { buffer = state.buf, silent = true, desc = 'Jump to previous command' })
+  end, { buffer = buf, silent = true, desc = 'Jump to previous command' })
   
-  -- Normal mode: Close window
+  -- Normal mode: Close window (only if this is the floating window)
   vim.keymap.set('n', '<C-c>', function()
-    M.close()
-  end, { buffer = state.buf, silent = true })
+    if buf == state.buf and state.win then
+      -- This is the floating window, close it
+      M.close()
+    end
+    -- For non-floating mode, don't bind Ctrl+C (let user manage their own window)
+  end, { buffer = buf, silent = true })
 end
+
+-- Setup keymaps for the floating window (backwards compatibility)
+local function setup_keymaps()
+  setup_keymaps_for_buffer(state.buf)
+end
+
 
 -- Close floating terminal
 function M.close()
@@ -682,9 +769,6 @@ function M.open()
     create_buffer()
   end
   
-  -- Setup highlights
-  setup_highlights()
-  
   -- Create window
   create_window()
   
@@ -692,6 +776,12 @@ function M.open()
   setup_keymaps()
   
   state.is_open = true
+end
+
+-- Get the shared command buffer that can be used in any window
+function M.create_command_buffer(name)
+  -- Always return the shared buffer, ignore name parameter for consistency
+  return get_or_create_shared_buffer()
 end
 
 -- Expose completion function for v:lua access
@@ -707,10 +797,36 @@ function M.setup(opts)
     config[k] = v
   end
   
-  -- Set up global keymap if keybind is provided
+  -- Set up global keymaps if keybinds are provided
   if config.keybind then
     vim.keymap.set('n', config.keybind, M.open, { silent = true, desc = 'Open floating command line' })
   end
+  
+  if config.edit_keybind then
+    vim.keymap.set('n', config.edit_keybind, function()
+      local buf = M.create_command_buffer()
+      vim.api.nvim_set_current_buf(buf)
+    end, { silent = true, desc = 'Edit command buffer in current window' })
+  end
+  
+  -- Create main user command with subcommands
+  vim.api.nvim_create_user_command('Fcl', function(opts)
+    local cmd = opts.fargs[1]
+    if cmd == 'open' then
+      M.open()
+    elseif cmd == 'edit' then
+      local buf = M.create_command_buffer()
+      vim.api.nvim_set_current_buf(buf)
+    else
+      vim.notify('Usage: :Fcl open | :Fcl edit', vim.log.levels.ERROR)
+    end
+  end, {
+    nargs = 1,
+    complete = function()
+      return {'open', 'edit'}
+    end,
+    desc = 'Floating command line: open (floating window) | edit (current window)'
+  })
 end
 
 return M
